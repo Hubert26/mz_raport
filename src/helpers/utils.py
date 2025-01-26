@@ -3,67 +3,52 @@ import os
 from typing import Optional, List, Dict
 from pathlib import Path
 import pandas as pd
+import glob
 
 
-def load_environment_variables(
-    env_file_path: str = ".env",
-    required_vars: Optional[List[str]] = None,
-) -> Dict[str, Optional[str]]:
+def get_files_paths(main_folder, dataset_name, extension):
     """
-    Load all environment variables from a specified .env file and ensure required variables are present.
+    Searches for all files with the specified extension in the given folder and subfolders
+    that start with the specified dataset name.
 
     Args:
-        env_file_path (str): Path to the .env file. Default is '.env'.
-        required_vars (Optional[List[str]]): A list of environment variable names that are required.
-            If specified, the function will raise a ValueError if any of these variables are missing or empty.
+        main_folder (str): Path to the main folder to search within.
+        dataset_name (str): Prefix of the file names to search for.
+        extension (str): File extension to search for (e.g., 'csv', 'xlsx').
 
     Returns:
-        Dict[str, Optional[str]]: A dictionary containing all environment variables with their corresponding values
-        from the .env file.
-
-    Raises:
-        FileNotFoundError: If the specified .env file does not exist.
-        ValueError: If any of the required variables are missing or empty.
+        list: List of file paths that match the criteria.
     """
-    # Check if the .env file exists
-    env_file = Path(env_file_path)
-    if not env_file.exists():
-        raise FileNotFoundError(f"The .env file at '{env_file_path}' does not exist!")
-
-    # Load variables from the .env file
-    env_vars = dotenv_values(env_file_path)
-
-    # Check for required variables if specified
-    if required_vars:
-        missing_vars = [
-            var for var in required_vars if var not in env_vars or not env_vars[var]
-        ]
-        if missing_vars:
-            raise ValueError(
-                f"Required environment variables are missing or empty: {', '.join(missing_vars)}"
-            )
-
-    return env_vars
+    pattern = os.path.join(main_folder, "**", f"{dataset_name}*.{extension}")
+    file_list = glob.glob(pattern, recursive=True)
+    return file_list
 
 
-def split_string(
-    input_string: str, delimiter: str = ",", strip_whitespace: bool = True
-) -> List[str]:
+def load_files(file_paths):
     """
-    Split a string by a specified delimiter and optionally strip whitespace from each element.
+    Reads multiple files based on their extension and combines them into a single DataFrame.
 
     Args:
-        input_string (str): The input string to be split.
-        delimiter (str): The character used to split the string (default is ',').
-        strip_whitespace (bool): Whether to strip whitespace from each split element (default is True).
+        file_paths (list): List of file paths to be loaded.
 
     Returns:
-        List[str]: A list of strings obtained by splitting the input string.
+        pd.DataFrame: Combined DataFrame containing data from all files.
     """
-    elements = input_string.split(delimiter)
-    if strip_whitespace:
-        return [element.strip() for element in elements]
-    return elements
+    dataframes = []
+
+    for path in file_paths:
+        extension = os.path.splitext(path)[-1].lower()
+        if extension == ".csv":
+            df = read_csv(path)
+        elif extension == ".xlsx":
+            df = read_excel(path)
+        else:
+            raise ValueError(f"Unsupported file format: {extension}")
+
+        dataframes.append(df)
+
+    combined_df = pd.concat(dataframes, ignore_index=True)
+    return combined_df
 
 
 def check_file_exists(file_path, error_message=None):
@@ -158,6 +143,107 @@ def write_csv(data, file_path, **kwargs):
         print(f"CSV file successfully written to: {file_path}")
     except Exception as e:
         raise ValueError(f"Failed to write CSV file: {file_path}\nError: {e}")
+
+
+def filter_dataframe(df, filter_dict):
+    """
+    Filters the DataFrame based on conditions specified in a dictionary.
+
+    Args:
+        df (pd.DataFrame): The DataFrame to be filtered.
+        filter_dict (dict): Dictionary with column names as keys and filter values as values.
+
+    Returns:
+        pd.DataFrame: Filtered DataFrame.
+    """
+    for key, value in filter_dict.items():
+        df = df[df[key] == value]
+    return df
+
+
+def analyze_dataframe(dataframe):
+    """
+    Analyzes DataFrame columns by calculating missing data statistics, unique value counts, and data types.
+
+    Args:
+        dataframe (pd.DataFrame): Input DataFrame for analysis.
+
+    Returns:
+        pd.DataFrame: Analysis results with columns:
+            - column_name: Name of each column
+            - missing_values_total: Count of missing values
+            - missing_values_percent: Percentage of missing values
+            - unique_values_count: Count of unique values
+            - data_type: Data type of each column
+    """
+    results = []
+
+    for col in dataframe.columns:
+        missing_total = dataframe[col].isnull().sum()
+        missing_percent = 100 * missing_total / len(dataframe)
+
+        unique_count = dataframe[col].nunique()
+        data_type = dataframe[col].dtype
+
+        results.append([col, missing_total, missing_percent, unique_count, data_type])
+
+    analysis_df = pd.DataFrame(
+        results,
+        columns=[
+            "column_name",
+            "missing_values_total",
+            "missing_values_percent",
+            "unique_values_count",
+            "data_type",
+        ],
+    )
+
+    return analysis_df
+
+
+def fill_missing_values_based_on_column_mapping(
+    df, target_col="Województwo", reference_col="Nazwa świadczeniodawcy"
+):
+    """
+    Fills missing values in the target column based on unique values from the reference column.
+
+    Args:
+        df (pd.DataFrame): The DataFrame to process.
+        target_col (str): The column in which missing values will be filled.
+        reference_col (str): The column used to map values to the target column.
+
+    Returns:
+        pd.DataFrame: DataFrame with filled missing values.
+    """
+    unique_reference_df = (
+        df[[target_col, reference_col]].dropna().drop_duplicates(keep="first")
+    )
+
+    # Check for duplicates in the reference column
+    duplicate_reference_df = unique_reference_df[
+        unique_reference_df[reference_col].duplicated(keep=False)
+    ]
+    duplicate_reference_values = set(duplicate_reference_df[reference_col])
+
+    # Identify rows where target column is missing and reference column is not null
+    missing_target_condition = df[target_col].isna() & df[reference_col].notna()
+
+    # Filter rows where reference column value is not duplicated
+    filtered_df = df[
+        missing_target_condition & ~df[reference_col].isin(duplicate_reference_values)
+    ]
+
+    # Create mapping dictionary
+    reference_to_target_mapping = dict(
+        zip(unique_reference_df[reference_col], unique_reference_df[target_col])
+    )
+
+    # Fill missing values using the mapping
+    df.loc[filtered_df.index, target_col] = df.loc[
+        filtered_df.index, reference_col
+    ].map(reference_to_target_mapping)
+
+    return df
 
 
 def read_excel(file_path, **kwargs):
